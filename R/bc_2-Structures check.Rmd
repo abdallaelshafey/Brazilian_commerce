@@ -1,0 +1,317 @@
+---
+title: "Brazilian Commerce — Processing & Cleaning"
+author: ""
+date: "2026-04-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Libraries
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(DataExplorer)
+library(janitor)
+library(naniar)
+```
+
+# Load Data
+
+```{r, message=FALSE}
+file_list = list.files(path = "../Csvs", pattern = "\\.csv$", full.names = TRUE)
+
+customers      = read_csv(file_list[1], na = c("", "<NA>"))
+geolocation    = read_csv(file_list[2])
+order_items    = read_csv(file_list[3])
+order_payments = read_csv(file_list[4])
+order_reviews  = read_csv(file_list[5])
+orders         = read_csv(file_list[6])
+products       = read_csv(file_list[7])
+sellers        = read_csv(file_list[8])
+name_trans     = read_csv(file_list[9])
+
+df_list1 = list(customers, geolocation, order_items, order_payments)
+df_list2 = list(order_reviews, orders, products, sellers, name_trans)
+```
+
+The hierarchical plots below display all tables alongside their column names and types simultaneously, providing a high-level overview of the database structure before we examine each table individually.
+
+```{r}
+plot_str(df_list1)
+plot_str(df_list2)
+```
+
+---
+
+# Processing
+
+### `customers`
+
+```{r, message=FALSE}
+glimpse(customers)
+# Column types and names look correct.
+# Zip code is kept as a string to preserve leading zeros, which are meaningful for identification.
+
+plot_intro(customers)
+# No missingness.
+
+customers |> get_dupes()
+# No duplicates.
+```
+
+Nothing of note; moving on.
+
+---
+
+### `geolocation`
+
+```{r}
+glimpse(geolocation)
+# Column types and names look correct.
+
+plot_intro(geolocation)
+# No missingness.
+
+nrow(geolocation)
+
+geolocation |>
+  get_dupes() |>
+  distinct()
+# ~130,000 duplicate rows detected.
+
+geolocation = geolocation |>
+  distinct()
+# Duplicates removed.
+```
+
+---
+
+### `order_items`
+
+```{r}
+glimpse(order_items)
+# Column types and names look correct.
+
+plot_intro(order_items)
+# No missingness.
+
+order_items |>
+  get_dupes() |>
+  distinct()
+# No duplicates.
+```
+
+---
+
+### `order_payments`
+
+```{r}
+glimpse(order_payments)
+# Column types and names look correct.
+
+plot_intro(order_payments)
+# No missingness.
+
+order_payments |>
+  get_dupes() |>
+  distinct()
+# No duplicates.
+```
+
+---
+
+### `order_reviews`
+
+```{r}
+glimpse(order_reviews)
+# Column types and names look correct.
+
+plot_intro(order_reviews)
+# Missingness detected — exploring further.
+
+miss_var_summary(order_reviews)
+# review_comment_title and review_comment_message have high missingness rates.
+# Both columns are retained for potential NLP work; the nature of the missingness
+# will be examined in more detail at that stage.
+
+order_reviews |>
+  get_dupes() |>
+  distinct()
+# No duplicates.
+```
+
+---
+
+### `orders`
+
+```{r}
+glimpse(orders)
+# Column types and names look correct.
+
+plot_intro(orders)
+# Missingness detected.
+
+miss_var_summary(orders)
+# Missingness is confined to date columns only.
+```
+
+Date missingness in an e-commerce context is most plausibly caused by logging failures or pipeline issues rather than the values themselves, so MNAR is unlikely. `order_purchase_timestamp` has no missingness — customers successfully placed these orders — but downstream delivery dates are missing, suggesting items were never dispatched or delivered.
+
+```{r}
+gg_miss_var(orders, order_status)
+```
+
+Cancelled orders partly account for missingness in the delivery date columns, which is expected: cancelled orders are never delivered. Some orders show a shipped status but no delivery date, indicating they were dispatched but had not yet arrived at the time of data collection.
+
+```{r}
+orders |>
+  mutate(
+    purchase_week     = floor_date(order_purchase_timestamp, "week"),
+    delivered_missing = is.na(order_delivered_customer_date),
+    is_cancelled      = order_status == "canceled"
+  ) |>
+  group_by(purchase_week) |>
+  summarise(
+    pct_missing_delivery = mean(delivered_missing) * 100,
+    pct_cancelled        = mean(is_cancelled) * 100
+  ) |>
+  pivot_longer(-purchase_week, names_to = "metric", values_to = "percent") |>
+  ggplot(aes(x = purchase_week, y = percent, colour = metric)) +
+  geom_line() +
+  labs(
+    title  = "Delivery date missingness vs cancellation rate over time",
+    x      = "Purchase week",
+    y      = "%",
+    colour = NULL
+  )
+```
+
+The cancellation rate closely tracks the delivery missingness rate, confirming that cancellations are the primary driver. The spike to 100% missingness at the tail end of the series warrants closer inspection — it is unlikely that every customer cancelled simultaneously, suggesting the data may have become sparse rather than reflecting genuine behaviour.
+
+```{r, warning=FALSE}
+weekly_summary = orders |>
+  mutate(purchase_week = floor_date(order_purchase_timestamp, "week")) |>
+  group_by(purchase_week) |>
+  summarise(
+    n_orders             = n(),
+    pct_missing_delivery = mean(is.na(order_delivered_customer_date)) * 100,
+    pct_cancelled        = mean(order_status == "canceled") * 100,
+    .groups = "drop"
+  )
+
+p1 = weekly_summary |>
+  pivot_longer(cols = c(pct_missing_delivery, pct_cancelled),
+               names_to = "metric", values_to = "percent") |>
+  ggplot(aes(x = purchase_week, y = percent, colour = metric)) +
+  geom_line() +
+  labs(title = "Rates over time", x = NULL, y = "%", colour = NULL)
+
+p2 = weekly_summary |>
+  ggplot(aes(x = purchase_week, y = n_orders)) +
+  geom_col(fill = "steelblue", alpha = 0.7) +
+  labs(title = "Order volume per week", x = "Purchase week", y = "# orders")
+
+library(patchwork)
+p1 / p2
+```
+
+The volume plot explains the instability: extreme rate swings before 2017-01 and after 2018-07 coincide with periods of very low order counts, where a handful of observations cause large percentage fluctuations.
+
+```{r}
+# Confirm where volume collapses at the tail
+weekly_summary |>
+  filter(purchase_week >= as.Date("2018-07-01")) |>
+  select(purchase_week, n_orders, pct_missing_delivery)
+```
+
+Volume begins collapsing at the week of 2018-08-26.
+
+```{r}
+# Confirm where volume initially stabilises
+weekly_summary |>
+  filter(purchase_week >= as.Date("2016-08-01") &
+         purchase_week <= as.Date("2017-03-01")) |>
+  select(purchase_week, n_orders, pct_missing_delivery)
+```
+
+Volume stabilises around 2017-01-22. The reliable analysis window is therefore **2017-01-22 to 2018-08-26**.
+
+```{r}
+orders |>
+  get_dupes() |>
+  distinct()
+# No duplicates.
+```
+
+---
+
+### `products`
+
+```{r, message=FALSE}
+glimpse(products)
+# Column types and names look correct.
+
+plot_intro(products)
+# Missingness detected.
+
+miss_var_summary(products)
+# product_category_name, product_name_lenght, product_description_lenght,
+# and product_photos_qty all show missingness at n = 610.
+# The identical count across all four columns suggests a shared cause:
+# the same set of products likely had no listing details filled in by the seller.
+```
+
+```{r}
+# Verify that the same 610 products are responsible for all missingness
+products |>
+  group_by(product_id) |>
+  summarise(
+    miss_cat_name          = sum(is.na(product_category_name)),
+    miss_name_len          = sum(is.na(product_name_lenght)),
+    miss_description_len   = sum(is.na(product_description_lenght)),
+    miss_photos_qty        = sum(is.na(product_photos_qty))
+  ) |>
+  filter(if_all(starts_with("miss_"), ~ . != 0)) |>
+  dim()
+# 610 rows confirmed — listing details were not provided for these products.
+```
+
+```{r}
+products |>
+  get_dupes() |>
+  distinct()
+# No duplicates.
+```
+
+---
+
+### `sellers`
+
+```{r}
+glimpse(sellers)
+# Column types and names look correct.
+
+plot_intro(sellers)
+# No missingness.
+
+sellers |> get_dupes()
+# No duplicates.
+```
+
+---
+
+### `name_trans`
+
+```{r}
+glimpse(name_trans)
+# Column types and names look correct.
+
+plot_intro(name_trans)
+# No missingness.
+
+name_trans |> get_dupes()
+# No duplicates.
+```

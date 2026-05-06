@@ -1,0 +1,68 @@
+Table fact_order_items {
+  order_item_sk int [pk]
+  order_id varchar
+  order_item_id int
+  seller_id varchar [ref: > dim_seller.seller_id]
+  product_id varchar [ref: > dim_product.product_id]
+  customer_id varchar [ref: > dim_customer.customer_id]
+  order_date_id int [ref: > dim_date.date_id]
+  price decimal
+  freight_value decimal
+}
+
+Table fact_orders {
+  order_id varchar [pk]
+  customer_id varchar [ref:> dim_customer.customer_id]
+  order_date_id int [ref:> dim_date.date_id]
+  review_score int
+  review_id varchar
+}
+
+Table fact_payments {
+  payment_sk int [pk] // this is a surrogate key for convenient labelling. the real primary key is composite of payment_type and order-id
+  payment_type varchar
+  order_id varchar 
+  payment_sequential int
+  payment_installments int 
+  payment_value double
+  order_date_id int [Ref:> dim_date.date_id] // redundant but makes queries more convenient
+  customer_id varchar [Ref:> dim_customer.customer_id] // redundant but makes 
+
+}
+
+
+Table dim_seller {
+  seller_id varchar [pk]
+  seller_city varchar
+  seller_state varchar
+  seller_zip_code_prefix varchar
+}
+
+Table dim_product {
+  product_id varchar [pk]
+  category_name_english varchar
+  product_weight_g int
+  product_length_cm int
+  product_height_cm int
+  product_width_cm int
+  product_photos_qty int
+}
+
+Table dim_customer {
+  customer_id varchar [pk]
+  customer_unique_id varchar
+  customer_city varchar
+  customer_state varchar
+  customer_zip_code_prefix varchar
+}
+
+Table dim_date {
+  date_id int [pk]
+  full_date date
+  year int
+  quarter int
+  month int
+  month_name varchar
+  week int
+  day_of_week varchar
+}

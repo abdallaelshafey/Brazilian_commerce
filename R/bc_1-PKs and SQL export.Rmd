@@ -1,0 +1,231 @@
+---
+title: "Brazilian Commerce — Exploratory Data Analysis & Data Modelling"
+author: ""
+date: "2026-04-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Overview
+
+This document covers three sequential tasks:
+
+1.  Loading the raw Olist CSV files and inspecting their structure
+2.  Determining primary keys and identifying row-level redundancies for each table
+3.  Preparing and exporting cleaned tables to a local PostgreSQL database
+
+------------------------------------------------------------------------
+
+# Libraries
+
+```{r}
+library(DataExplorer)
+library(tidyverse)
+library(purrr)
+library(DBI)
+library(RPostgres)
+```
+
+------------------------------------------------------------------------
+
+# Load Data
+
+Files are loaded by position from the working directory. The expected order is: customers, geolocation, order_items, order_payments, order_reviews, orders, products, sellers, name_trans.
+
+```{r}
+file_list <- list.files(pattern = "\\.csv$", full.names = TRUE)
+
+customers      <- read_csv(file_list[1])
+geolocation    <- read_csv(file_list[2])
+order_items    <- read_csv(file_list[3])
+order_payments <- read_csv(file_list[4])
+order_reviews  <- read_csv(file_list[5])
+orders         <- read_csv(file_list[6])
+products       <- read_csv(file_list[7])
+sellers        <- read_csv(file_list[8])
+name_trans     <- read_csv(file_list[9])
+```
+
+------------------------------------------------------------------------
+
+# Database Structure
+
+The two plots below visualise the column-level structure of all tables as a hierarchical network. This serves as a starting point for understanding how tables relate to one another before formal key checking.
+
+```{r fig.height=10, fig.width=25, fig.align='center'}
+df_list1 <- list(customers, geolocation, order_items, order_payments)
+df_list2 <- list(order_reviews, orders, products, sellers, name_trans)
+
+plot_str(df_list1)
+plot_str(df_list2)
+```
+
+------------------------------------------------------------------------
+
+# Primary Key Identification
+
+The function below checks whether one or more columns uniquely identify every row in a table. It returns the number of rows, the number of distinct combinations of the specified columns, the number of duplicates, and a boolean indicating whether the columns constitute a valid key.
+
+```{r}
+check_key <- function(df, ...) {
+  cols <- rlang::ensyms(...)
+  col_names <- purrr::map_chr(cols, rlang::as_string)
+
+  n_rows         <- nrow(df)
+  n_distinct_rows <- df |> dplyr::distinct(!!!cols) |> nrow()
+  n_dupes        <- n_rows - n_distinct_rows
+
+  tibble::tibble(
+    columns    = paste(col_names, collapse = " + "),
+    n_rows     = n_rows,
+    n_distinct = n_distinct_rows,
+    n_dupes    = n_dupes,
+    is_key     = n_dupes == 0
+  )
+}
+```
+
+## Customers
+
+`customer_id` uniquely identifies each row, but it is not a stable identifier for a person: the same individual receives a new `customer_id` for each order they place. `customer_unique_id` is the persistent identifier across orders.
+
+```{r}
+customers |> check_key(customer_id)
+
+n_distinct(customers$customer_id)
+n_distinct(customers$customer_unique_id)
+```
+
+## Geolocation
+
+No single column or combination of columns uniquely identifies rows. The table contains multiple coordinate entries per zip code prefix, which means it functions as a reference lookup rather than a proper relational table. Latitude and longitude are dropped for the analytical pipeline; only zip code prefix, city, and state are retained as a deduplicated reference.
+
+```{r}
+geolocation |> check_key(
+  geolocation_zip_code_prefix,
+  geolocation_lat,
+  geolocation_lng,
+  geolocation_city,
+  geolocation_state
+)
+
+geolocation2 <- geolocation
+# There are many Latitude (lat) and longitude (lng) values per zip, city, and state
+# Latitude and longitude retained
+
+geolocation <- geolocation |>
+  select(geolocation_zip_code_prefix, geolocation_city, geolocation_state) |>
+  distinct()
+# Latitude and longitude removed
+```
+
+## Order Items
+
+The combination of `order_id` and `order_item_id` forms the composite primary key. `order_item_id` indexes individual line items within a single order. `shipping_limit_date` is the deadline by which the seller must hand the item to the carrier.
+
+```{r}
+order_items |> check_key(order_id, order_item_id)
+```
+
+## Orders
+
+`order_id` is the primary key.
+
+```{r}
+orders |> check_key(order_id)
+```
+
+## Order Payments
+
+The composite key is `order_id` + `payment_sequential`. `payment_sequential` indexes individual payment entries within a single order, allowing for orders paid using multiple methods (e.g., partial cash and partial credit card produces a `payment_sequential` of 2).
+
+```{r}
+order_payments |> check_key(order_id, payment_sequential)
+```
+
+## Products
+
+`product_id` is the primary key. Portuguese category names are replaced with English translations via a left join against `name_trans` before export.
+
+```{r}
+products |> check_key(product_id)
+
+products <- products |>
+  left_join(name_trans, join_by(product_category_name)) |>
+  select(-c(product_category_name))
+```
+
+## Order Reviews
+
+The composite key is `review_id` + `order_id`. Some orders have more than one associated review. We will keep note of this for subsequent analysis.
+
+```{r}
+order_reviews |> check_key(review_id, order_id)
+```
+
+## Sellers
+
+`seller_id` is the primary key.
+
+```{r}
+sellers |> check_key(seller_id)
+```
+
+## Name Translations
+
+`product_category_name` is the primary key.
+
+```{r}
+name_trans |> check_key(product_category_name)
+```
+
+------------------------------------------------------------------------
+
+# Export to PostgreSQL
+
+Tables with straightforward primary keys (customers, products, sellers) were imported manually via pgAdmin4. The remaining tables are written programmatically via the DBI connector below.
+
+Notes on each table:
+
+-   **orders**: single primary key, no transformation needed
+-   **order_reviews**: composite primary key; some orders have multiple reviews
+-   **order_items**: composite primary key; a surrogate key will be created in SQL
+-   **order_payments**: composite primary key; a surrogate key will be created in SQL
+-   **products**: English category names only
+-   **geolocation**: deduplicated to zip code prefix, city, and state (\~27,000 rows)
+-   **geolocation2**: full table including coordinates, retained for Tableau use
+
+```{r}
+connection <- dbConnect(
+  Postgres(),
+  dbname  = "Brazilian commerce",
+  host    = "localhost",
+  port    = 5432,
+  user    = "postgres",
+  password = ""  # Fill in with your own password.
+)
+
+tables <- list(
+  orders             = orders,
+  order_items        = order_items,
+  order_payments     = order_payments,
+  order_reviews      = order_reviews,
+  geolocation        = geolocation,
+  geolocation_tableau = geolocation2,
+  products           = products,
+  dim_customer       = customers,
+  dim_seller         = sellers
+)
+
+for (name in names(tables)) {
+  dbWriteTable(
+    conn      = connection,
+    name      = name,
+    value     = tables[[name]],
+    overwrite = TRUE
+  )
+}
+```

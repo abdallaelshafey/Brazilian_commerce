@@ -1,0 +1,329 @@
+---
+title: "Brazilian Commerce — Exploratory Data Analysis"
+author: ""
+date: "2026-04-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Libraries
+
+```{r}
+library(tidyverse)
+library(geobr)       # Brazilian administrative boundaries
+library(sf)          # spatial vector data and coordinate systems
+library(janitor)     # duplicate value checking
+library(rstatix)     # outlier detection
+library(patchwork)   # composing multi-panel plots
+```
+
+# Load Data
+
+```{r}
+file_list <- list.files(path = "../Csvs" ,pattern = "\\.csv$", full.names = TRUE)
+
+customers      <- read_csv(file_list[1], na = c("", "<NA>"))
+geolocation    <- read_csv(file_list[2])
+order_items    <- read_csv(file_list[3])
+order_payments <- read_csv(file_list[4])
+order_reviews  <- read_csv(file_list[5])
+orders         <- read_csv(file_list[6])
+products       <- read_csv(file_list[7])
+sellers        <- read_csv(file_list[8])
+name_trans     <- read_csv(file_list[9])
+```
+
+---
+
+# Visuals
+
+## Average price vs freight value by product category
+
+For the top 10 product categories by order volume, we compare average item price against average freight value side by side. This requires joining `order_items` to `products`, aggregating both metrics simultaneously, and translating Portuguese category names into English.
+
+```{r}
+products <- products |>
+  mutate(product_category_name = replace_na(product_category_name, "NA"))
+
+left_join(order_items, products, join_by(product_id)) |>
+  group_by(product_category_name) |>
+  summarise(
+    `Avg Freight Value` = mean(freight_value),
+    `Avg Price`         = mean(price),
+    n = n()
+  ) |>
+  arrange(desc(n)) |>
+  slice(1:10) |>
+  left_join(name_trans, join_by(product_category_name)) |>
+  mutate(
+    product_category_name_english = case_when(
+      product_category_name == "cama_mesa_banho"       ~ "Bed / Bath / Table",
+      product_category_name == "informatica_acessorios" ~ "Computers / Accessories",
+      product_category_name == "beleza_saude"           ~ "Health / Beauty",
+      product_category_name == "automotivo"             ~ "Auto",
+      product_category_name == "relogios_presentes"     ~ "Watch Gifts",
+      product_category_name == "ferramentas_jardim"     ~ "Garden Tools",
+      product_category_name == "esporte_lazer"          ~ "Sports / Leisure",
+      product_category_name == "utilidades_domesticas"  ~ "Housewares",
+      product_category_name == "moveis_decoracao"       ~ "Furniture / Decor",
+      product_category_name == "telefonia"              ~ "Telephony",
+      TRUE ~ as.character(product_category_name_english)
+    )
+  ) |>
+  pivot_longer(cols = 2:3, names_to = "value_type", values_to = "value") |>
+  ggplot(aes(x = product_category_name_english, y = value, fill = value_type)) +
+  geom_col(aes(reorder(product_category_name_english, value)), position = "dodge") +
+  coord_flip() +
+  labs(
+    x    = "Product category",
+    y    = "Value ($)",
+    fill = "Cost type"
+  ) +
+  theme_classic()
+```
+
+
+Watch gifts are the most expensive category, whereas freight value, which is the monetary cost of transporting goods from one location to another, is relatively consistent between categories.
+
+## Seller density by state
+
+The number of unique sellers per Brazilian state is plotted as a choropleth map. `sellers` is joined to `geolocation` to obtain state codes, which are then matched against state boundary geometries from `geobr`.
+
+```{r, message=FALSE}
+seller_by_state <- geolocation |>
+  group_by(geolocation_zip_code_prefix) |>
+  summarise(state = first(geolocation_state)) |>
+  inner_join(sellers, join_by(geolocation_zip_code_prefix == seller_zip_code_prefix)) |>
+  group_by(state) |>
+  summarise(`Number of sellers` = n())
+
+br_states <- geobr::read_state() # read_state() contains geospatial data for all brazillian states
+
+seller_by_state |>
+  left_join(br_states, join_by(state == abbrev_state)) |>
+  # left_join drops the sf class; st_as_sf() restores it for geom_sf
+  st_as_sf() |>
+  ggplot() +
+  geom_sf(aes(fill = `Number of sellers`)) +
+  labs(x = "Longitude (°W)", y = "Latitude (°S)") +
+  theme_classic()
+```
+
+## Payment value heatmap
+
+For each combination of payment type and number of installments, we plot the average payment value as a heatmap. This highlights how order value scales with installment count across payment methods.
+
+```{r}
+order_payments |>
+  group_by(payment_type, payment_installments) |>
+  summarise(`Avg payment value` = mean(payment_value)) |>
+  rename(
+    `Payment installments` = payment_installments,
+    `Payment type`         = payment_type
+  ) |>
+  mutate(
+    `Payment type` = case_when(
+      `Payment type` == "voucher"     ~ "Voucher",
+      `Payment type` == "not_defined" ~ "Not Defined",
+      `Payment type` == "debit_card"  ~ "Debit Card",
+      `Payment type` == "credit_card" ~ "Credit Card",
+      `Payment type` == "boleto"      ~ "Boleto",
+      TRUE ~ as.character(`Payment type`)
+    )
+  ) |>
+  ggplot() +
+  geom_tile(aes(
+    x    = `Payment installments`,
+    y    = `Payment type`,
+    fill = `Avg payment value`
+  )) +
+  theme_classic()
+```
+
+
+
+It seems that one can only pay in installments using a credit card. 
+
+## Hourly sales volume
+
+Purchase timestamps are grouped by hour to produce a polar bar chart showing which hours of the day see the highest order volumes.
+
+```{r}
+orders |>
+  group_by(hour = hour(order_purchase_timestamp)) |>
+  summarise(`Number of sales` = n()) |>
+  ggplot(aes(x = hour, y = `Number of sales`)) +
+  geom_col() +
+  coord_polar(start = 0, direction = 1) +
+  scale_x_continuous(breaks = 0:23, limits = c(0, 24)) +
+  labs(title = "Hourly sales volume") +
+  theme_minimal() +
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank())
+```
+
+
+Most sales occur between the afternoon and evening, peaking at 1 pm - 5 pm, with the highest point being 4 pm. At around midnight to 6 am, there practically negligible sales.
+
+## Monthly revenue for top 5 categories
+
+`order_items` is joined to `products` and `orders` to get both category names and purchase timestamps. Revenue is then summed by category and month, keeping only the five highest-grossing categories.
+
+```{r}
+eng_products = products |>
+  left_join(name_trans, join_by(product_category_name)) |>
+  select(product_id, product_category_name_english)
+
+category_monthly = order_items |>
+  left_join(eng_products, join_by(product_id)) |>
+  select(order_id, order_item_id, product_id, product_category_name_english, price) |>
+  left_join(orders, join_by(order_id)) |>
+  group_by(
+    `Category name` = product_category_name_english,
+    Month           = month(order_purchase_timestamp)
+  ) |>
+  summarise(`Units sold` = n(), Revenue = sum(price)) |>
+  arrange(desc(`Units sold`))
+
+top_5 = category_monthly |>
+  group_by(`Category name`) |>
+  summarise(`Yearly sales` = sum(Revenue)) |>
+  slice_max(order_by = `Yearly sales`, n = 5)
+
+category_monthly |>
+  filter(`Category name` %in% top_5$`Category name`) |>
+  mutate(
+    `Category name` = case_when(
+      `Category name` == "health_beauty"         ~ "Health & Beauty",
+      `Category name` == "bed_bath_table"        ~ "Bed / Bath / Table",
+      `Category name` == "computers_accessories" ~ "Computers / Accessories",
+      `Category name` == "sports_leisure"        ~ "Sports / Leisure",
+      `Category name` == "watches_gifts"         ~ "Watches / Gifts",
+      TRUE ~ as.character(`Category name`)
+    )
+  ) |>
+  ggplot(aes(x = Month, y = Revenue, fill = `Category name`, colour = `Category name`)) +
+  geom_line() +
+  scale_x_continuous(breaks = 1:12) +
+  labs(title = "Monthly revenue", subtitle = "top 5 product categories") +
+  theme_classic()
+```
+
+
+It appears that generally, the most profitable category is Health & Beauty, whereas the least profitable one is Computers & Accessories.
+
+## Delivery time distribution by state
+
+Delivery time is computed as the difference in hours between purchase timestamp and customer delivery date, restricted to delivered orders. The distribution is plotted per state using a ridge plot with a log2-scaled x-axis, where each unit represents a doubling of delivery time.
+
+```{r, fig.width=10}
+library(ggridges); library(patchwork)
+
+r1 = orders |>
+  filter(order_status == "delivered") |>
+  mutate(
+    `Delivery time` = as.numeric(difftime(
+      time1 = order_delivered_customer_date,
+      time2 = order_purchase_timestamp,
+      units = "hour"
+    ))
+  ) |>
+  filter(`Delivery time` > 0) |>
+  left_join(customers, join_by(customer_id)) |>
+  select(`Delivery time`, customer_state) |>
+  ggplot(aes(x = `Delivery time`, y = customer_state)) +
+  geom_density_ridges() +
+  scale_x_continuous(
+    transform = "log2",
+    breaks    = 2^(4:11),
+    labels    = 2^(4:11)
+  ) +
+  labs(
+    title    = "Distribution of delivery times by state",
+    subtitle = "Log2-scaled x-axis — each increment represents a doubling",
+    x        = "log2 Delivery time (hours)",
+    y        = "Customer state"
+  ) +
+  theme_minimal()
+
+r2 = orders |>
+  filter(order_status == "delivered") |>
+  mutate(
+    `Delivery time` = as.numeric(difftime(
+      time1 = order_delivered_customer_date,
+      time2 = order_purchase_timestamp,
+      units = "hour"
+    ))
+  ) |>
+  filter(`Delivery time` > 0) |>
+  left_join(customers, join_by(customer_id)) |>
+  select(`Delivery time`, customer_state) |>
+  ggplot(aes(x = `Delivery time`, y = customer_state)) +
+  geom_density_ridges() +
+  labs(
+    title    = "Distribution of delivery times by state",
+    x        = "Delivery time (hours)",
+    y        = "Customer state"
+  ) +
+  theme_minimal()
+
+r2+r1
+```
+Data appear right skewed with sparse but extreme outliers in the direction of high delivery times. We plot side by side the original delivery time distribution of different states, and log2 scaled version to centre the curves.
+
+## Review score vs delivery time
+
+Orders with multiple reviews (547 in total) are collapsed to a single score per order. Where multiple reviews for the same order contain different scores, the mean is computed and rounded. To avoid systematic bias from x.5 averages always rounding up, half-integer values are rounded randomly with equal probability in either direction.
+
+```{r, fig.width=8}
+random_round_half <- function(x, seed = 123) {
+  set.seed(seed)
+  is_half    <- abs(x - round(x - 0.5)) < 1e-10
+  x[is_half] <- x[is_half] + sample(c(-0.5, 0.5), sum(is_half), replace = TRUE)
+  round(x)
+}
+
+prepared_reviews <- order_reviews |>
+  group_by(order_id) |>
+  summarise(
+    n_reviews  = n(),
+    avg_score  = mean(review_score)
+  ) |>
+  mutate(score = random_round_half(avg_score))
+
+orders |>
+  filter(order_status == "delivered") |>
+  mutate(
+    `Delivery time` = as.numeric(difftime(
+      time1 = order_delivered_customer_date,
+      time2 = order_purchase_timestamp,
+      units = "hour"
+    ))
+  ) |>
+  select(order_id, `Delivery time`) |>
+  left_join(prepared_reviews, join_by(order_id)) |>
+  mutate(score = as.factor(score)) |>
+  ggplot(aes(x = score, y = `Delivery time`, fill = score)) +
+  geom_violin() +
+  geom_boxplot(width = 0.1) +
+  scale_y_continuous(limits = c(0, 2000)) + # 104 extreme outliers trimmed from ~99,000 observations
+  labs(
+    x    = "Review score",
+    y    = "Delivery time (hours)",
+    fill = "Review score"
+  ) +
+  theme_classic()
+```
+
+
+It appears there is a relationship between early delivery times and better review scores. When ordered items arrive earlier, sellers are more likely to receive a higher score, vice versa.
+
+---
+
+# Note on discontinuation
+
+At this point, we will move our analysis to SQL because analysing seller performance is starting to become complicated on account of needing to merge 3-4 tables together using our normalised schema. Especially inconvenient are these multi-table merges with multiple row validations after each step. 
+To make things more convenient, We will first create an analytic schema with dimension and fact tables to facilitate more complex analysis. It will also serve as a reference to help setup a BI application date model (like Power BI), should we ever visualise using Power BI.
+

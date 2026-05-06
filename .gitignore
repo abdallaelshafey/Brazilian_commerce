@@ -1,0 +1,12 @@
+.Rproj.user/
+/.Rhistory
+R/.Rhistory
+R/1-DataModel.Rmd
+R/2-Processing,Cleaning, Preliminary EDA.Rmd
+R/3-EDA.Rmd
+SQL/prepared tables for tableau analysis.sql
+SQL/tables for sellers dashboard.sql
+Tableau/Tableau model.png
+Tableau/Business qs.txt
+*.twbr
+
