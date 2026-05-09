@@ -6,7 +6,10 @@ R/2-Processing,Cleaning, Preliminary EDA.Rmd
 R/3-EDA.Rmd
 SQL/prepared tables for tableau analysis.sql
 SQL/tables for sellers dashboard.sql
+SQL/prepared tables for tableau analysis.sql
+SQL/tables for orders dashboard.sql
 Tableau/Tableau model.png
 Tableau/Business qs.txt
 *.twbr
+Tableau/Old/
 

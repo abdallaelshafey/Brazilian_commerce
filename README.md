@@ -32,7 +32,7 @@ An end-to-end analysis of the [Olist Brazilian E-Commerce dataset](https://www.k
 
 ### 1. Key Determination & Initial Export (`R/bc_1-PKs and SQL export.Rmd`)
 
-Raw CSVs are loaded and each table is inspected to identify primary and composite keys. Verified tables are exported to a local PostgreSQL database via DBI. The keys identified here inform the normalised schema built in step 2.
+Raw CSVs are loaded and each table is inspected to identify primary and composite keys. Verified tables are exported to a local PostgreSQL database via DBI connector. The keys identified here inform the normalised schema built in step 3.
 
 ### 2. Structure & Redundancy Checks (`R/bc_2-Structures check.Rmd`)
 
@@ -40,13 +40,13 @@ Each table is checked for missingness, duplicates, and join behaviour to ensure 
 
 Key findings:
 
-\- `geolocation` contained \~130,000 duplicate rows, removed via `distinct()`
+\- `geolocation` contained **\~130,000** duplicate rows
 
 \- `orders` date missingness is largely explained by cancelled orders
 
 \- The reliable analysis window was identified as **2017-01-22 to 2018-08-26**, outside of which order volumes are too sparse for stable inference
 
-\- 610 products had no seller listing details filled in
+\- **610** products had no seller listing details filled in
 
 ### 3. Normalised Data Model (`R/normalised_model_code.txt`)
 
@@ -56,35 +56,53 @@ A normalised relational data model is constructed in dbdiagram.io using the keys
 
 This image helped us do some EDA by being able to see the tables to be joined.
 
+![](Data%20models/normalised_model.png)
+
 ### 5. Exploratory Analysis & Visualisation (`R/EDA.Rmd`)
 
-Business questions are answered visually in R using the normalised model, taking advantage of R's finer plotting control relative to Tableau.
+Business questions are answered visually in R using the normalised model, taking advantage of R's finer plotting control relative to Tableau. We gave interpretations for each of these figures in the `EDA.Rmd` file.
 
-Analyses include:
+**Analyses include**:
 
 \- Average price vs freight value by product category
 
+![](images/clipboard-949744.png)
+
 \- Seller density by state (choropleth map)
+
+![](images/clipboard-2510016718.png)
 
 \- Payment value heatmap by type and installment count
 
+![](images/clipboard-785689008.png)
+
 \- Hourly sales volume (polar chart)
+
+![](images/clipboard-3851761376.png)
 
 \- Monthly revenue for the top 5 product categories
 
+![](images/clipboard-966412899.png)
+
 \- Delivery time distributions by state (ridge plot)
 
+![](images/clipboard-912345698.png)
+
 \- Review score vs delivery time (violin + boxplot)
+
+![](images/clipboard-3991126790.png)
 
 Multi-table joins for seller-level analysis became unwieldy in R; this work was moved to SQL.
 
 ### 6. Analytic Model (`SQL/analytic_model.sql`)
 
-A denormalised analytic model is created in PostgreSQL to overcome the join complexity of the normalised schema during SQL analysis. This wide, query-friendly structure underpins all subsequent SQL work.
+A denormalised analytic model is created in PostgreSQL (after exploring the Kimball group's data warehousing methods) to overcome the join complexity of the normalised schema during SQL analysis. This wide, query-friendly structure underpins all subsequent SQL work.
+
+![](Data%20models/analytic_model.png)
 
 ### 7. SQL Analysis (`SQL/analysis.sql`)
 
-Business questions are answered in SQL using the analytic model, across three levels of complexity:
+Business questions are answered in SQL using the analytic model, across three levels of complexity. For brevity's sake, we didn't include any code or images of the SQL analysis here:
 
 **Customer experience**
 
@@ -100,7 +118,7 @@ Business questions are answered in SQL using the analytic model, across three le
 
 \- Top 3 sellers per state by revenue
 
-\- Volume, low-quality sellers (above-average revenue, below-average score)
+\- High volume, low-quality sellers (above-average revenue, below-average score)
 
 **Operational trends**
 
@@ -112,29 +130,31 @@ Business questions are answered in SQL using the analytic model, across three le
 
 ### 8. Tableau Preparation (`SQL/tableau_prep.sql`)
 
-Since Tableau Public does not support a live database connection, analytic results are materialised as tables and exported to CSV. These CSVs are stored in `Csvs/Tableau/`.
+Since Tableau Public does not support a live database connection, analytic results are queried as tables first, then exported to CSV. These CSVs are stored in `Csvs/Tableau/`.
+
+I made another **7 SQL** queries to prep the dashboard tables. This makes a total of **15 SQL** queries for the project.
 
 ### 9. Tableau Dashboards
 
-Two dashboards built from the exported CSVs.
+Built one main dashboard from the exported CSVs.
 
-**Orders Dashboard** Covers the customer experience: delivery performance by state, late vs on-time order volume over time, and the impact of lateness on review scores.
+![](Tableau/brazilian_commerce_viz.png)
 
-Some Key findings:
+[Some Key findings]{.underline}:
 
 \- Average delivery time is **12.13 ± 9.52 days**
 
-\- **7.8%** of orders arrive late
-
 \- Late orders average a review score of **2.3** vs **4.3** for on-time orders
 
-\- Northern and Wester regions of Brazil have high average delivery days. As one travels South and East, delivery time decreases
+\- **Northern** and **Eastern** regions of Brazil have **high average % late deliveries**. As one travels South and East, delivery time decreases
 
-**Seller Dashboard** *(in progress)* Covers the supply side: revenue concentration, delivery responsibility, and seller quality by geography.
+\- **Orders arrive earlier than promised on average**: actual delivery days track consistently below promised delivery days **across the full 2017-2018 period**, and both have trended downward over time
 
-------------------------------------------------------------------------
+\-**Late deliveries** are typically **penalized as an increasing function of their lateness**. Early deliveries are rewarded equally to on-time deliveries or potentially slightly higher
 
-## Dataset
+-Lateness penalty on review scores holds uniformly across all price ranges, suggesting **customer dissatisfaction is not specific to budget** or premium purchases.
+
+### **Database**
 
 **Source:** [Olist Brazilian E-Commerce Public Dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) via Kaggle
 
